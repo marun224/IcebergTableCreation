@@ -1,0 +1,104 @@
+# Isolated project name so container names are prefixed (e.g. iceberg-nyc-minio-1)
+# and never collide with any pre-existing containers on this machine.
+name: iceberg-nyc
+
+services:
+  # Apache Iceberg REST catalog. Tracks table metadata; reads/writes Iceberg
+  # metadata files to MinIO via S3FileIO (endpoint = minio:9000 on the compose network).
+  iceberg-rest:
+    image: tabulario/iceberg-rest:1.6.0
+    ports:
+      - "8181:8181"
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
+      - CATALOG_WAREHOUSE=s3://${WAREHOUSE_BUCKET}/
+      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
+      - CATALOG_S3_ENDPOINT=http://minio:9000
+      - CATALOG_S3_PATH__STYLE__ACCESS=true
+      # Persistent JDBC (Postgres) catalog backend. Without this the image uses an
+      # in-memory SQLite catalog, so all table registrations vanish on restart.
+      - CATALOG_CATALOG__IMPL=org.apache.iceberg.jdbc.JdbcCatalog
+      - CATALOG_URI=jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      - CATALOG_JDBC_USER=${POSTGRES_USER}
+      - CATALOG_JDBC_PASSWORD=${POSTGRES_PASSWORD}
+    depends_on:
+      minio:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    networks:
+      - iceberg_net
+
+  # Postgres: durable metadata store for the Iceberg REST (JDBC) catalog.
+  # Holds namespace/table pointers; the actual data + metadata files stay in MinIO.
+  postgres:
+    image: postgres:16
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - iceberg_net
+
+  # MinIO: S3-compatible object storage that holds the Iceberg warehouse.
+  # Host ports are 9100/9101 to avoid clashing with any MinIO you already run
+  # on the default 9000/9001. Console at http://localhost:9101.
+  minio:
+    image: minio/minio
+    environment:
+      - MINIO_ROOT_USER=${AWS_ACCESS_KEY_ID}
+      - MINIO_ROOT_PASSWORD=${AWS_SECRET_ACCESS_KEY}
+      - MINIO_DOMAIN=minio
+    ports:
+      - "9100:9000"   # S3 API  (host:container)
+      - "9101:9001"   # Web console
+    command: ["server", "/data", "--console-address", ":9001"]
+    volumes:
+      - minio-data:/data
+    networks:
+      iceberg_net:
+        aliases:
+          # virtual-host style bucket addressing used by S3FileIO
+          - ${WAREHOUSE_BUCKET}.minio
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot init: waits for MinIO, then creates the warehouse bucket.
+  mc:
+    image: minio/mc
+    depends_on:
+      - minio
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
+    entrypoint: >
+      /bin/sh -c "
+      until (/usr/bin/mc alias set minio http://minio:9000 ${AWS_ACCESS_KEY_ID} ${AWS_SECRET_ACCESS_KEY}) do
+        echo '...waiting for minio...' && sleep 1;
+      done;
+      /usr/bin/mc mb --ignore-existing minio/${WAREHOUSE_BUCKET};
+      echo 'bucket ${WAREHOUSE_BUCKET} ready';
+      exit 0;
+      "
+    networks:
+      - iceberg_net
+
+networks:
+  iceberg_net:
+
+volumes:
+  minio-data:
+  postgres-data:

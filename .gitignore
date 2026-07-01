@@ -1,0 +1,14 @@
+# Secrets / local config
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Data (large parquet files — keep out of git)
+input_data/*.parquet
+
+# Local scripts left over from data download (optional)
+*.log
+config_err
