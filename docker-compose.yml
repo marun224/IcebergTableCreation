@@ -75,6 +75,24 @@ services:
       timeout: 3s
       retries: 10
 
+  # pgAdmin4: web UI for browsing the Postgres catalog backend (namespace/table
+  # pointers written by Iceberg's JdbcCatalog). Purely a dev convenience — not
+  # used by the pipeline itself.
+  pgadmin:
+    image: dpage/pgadmin4:8.12
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@local.dev
+      - PGADMIN_DEFAULT_PASSWORD=admin
+    ports:
+      - "8082:80"   # web UI: http://localhost:8082
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    networks:
+      - iceberg_net
+
   # One-shot init: waits for MinIO, then creates the warehouse bucket.
   mc:
     image: minio/mc
@@ -102,3 +120,4 @@ networks:
 volumes:
   minio-data:
   postgres-data:
+  pgadmin-data:
